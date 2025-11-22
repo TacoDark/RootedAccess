@@ -12,6 +12,10 @@ import time
 import uuid
 import datetime
 import asyncio
+import json
+import urllib.parse
+import ipaddress
+import re
 from typing import Literal, Optional
 
 # Load environment variables
@@ -39,6 +43,266 @@ start_time = time.time()
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     await bot.change_presence(activity=discord.Game(name="/help | Rooted Access"))
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    print(f"[ERROR] Command: {interaction.command.name if interaction.command else 'Unknown'} | Error: {error}")
+    if not interaction.response.is_done():
+        await interaction.response.send_message(f"An error occurred: {str(error)}", ephemeral=True)
+    else:
+        await interaction.followup.send(f"An error occurred: {str(error)}", ephemeral=True)
+
+# --- Logging ---
+
+@bot.event
+async def on_app_command_completion(interaction: discord.Interaction, command: app_commands.Command):
+    print(f"[LOG] User: {interaction.user} (ID: {interaction.user.id}) | Command: /{command.name} | Channel: {interaction.channel} | Time: {datetime.datetime.now()}")
+
+# --- Security & Dev Commands ---
+
+@bot.tree.command(name="scan_code", description="Static analysis for dangerous Python patterns")
+async def scan_code(interaction: discord.Interaction, code: str):
+    dangerous_patterns = [
+        r"eval\(", r"exec\(", r"os\.system", r"subprocess\.call", 
+        r"subprocess\.Popen", r"import os", r"import sys", r"__import__",
+        r"open\(", r"requests\.get", r"urllib\.request"
+    ]
+    found = []
+    for pattern in dangerous_patterns:
+        if re.search(pattern, code):
+            found.append(pattern.replace('\\', ''))
+    
+    if found:
+        await interaction.response.send_message(f"⚠️ **Potential Security Risks Found:**\n`{', '.join(found)}`", ephemeral=True)
+    else:
+        await interaction.response.send_message("✅ No obvious dangerous patterns found (basic scan).", ephemeral=True)
+
+@bot.tree.command(name="expand_url", description="Unshortens redirects to show the final destination")
+async def expand_url(interaction: discord.Interaction, url: str):
+    if not url.startswith("http"):
+        url = "http://" + url
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.head(url, allow_redirects=True) as resp:
+                await interaction.response.send_message(f"Original: <{url}>\nFinal: <{resp.url}>")
+    except Exception as e:
+        await interaction.response.send_message(f"Error expanding URL: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="pass_strength", description="Estimates password strength")
+async def pass_strength(interaction: discord.Interaction, password: str):
+    length_score = min(len(password) / 12, 1.0) * 40
+    variety_score = 0
+    if re.search(r"[a-z]", password): variety_score += 15
+    if re.search(r"[A-Z]", password): variety_score += 15
+    if re.search(r"\d", password): variety_score += 15
+    if re.search(r"[!@#$%^&*(),.?\":{}|<>]", password): variety_score += 15
+    
+    total_score = min(length_score + variety_score, 100)
+    
+    rating = "Weak"
+    color = discord.Color.red()
+    if total_score > 60:
+        rating = "Medium"
+        color = discord.Color.gold()
+    if total_score > 80:
+        rating = "Strong"
+        color = discord.Color.green()
+        
+    embed = discord.Embed(title="Password Strength", color=color)
+    embed.add_field(name="Rating", value=rating)
+    embed.add_field(name="Score", value=f"{int(total_score)}/100")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="chmod", description="Converts permissions (e.g. 777 <-> rwxrwxrwx)")
+async def chmod(interaction: discord.Interaction, value: str):
+    # Numeric to Symbolic
+    if value.isdigit() and len(value) == 3:
+        mapping = {
+            '0': '---', '1': '--x', '2': '-w-', '3': '-wx',
+            '4': 'r--', '5': 'r-x', '6': 'rw-', '7': 'rwx'
+        }
+        res = "".join(mapping.get(c, '???') for c in value)
+        await interaction.response.send_message(f"chmod {value} = `{res}`")
+    # Symbolic to Numeric (basic implementation)
+    elif len(value) == 9:
+        # rwxrwxrwx
+        try:
+            user = value[0:3]
+            group = value[3:6]
+            other = value[6:9]
+            
+            def to_num(perm):
+                n = 0
+                if 'r' in perm: n += 4
+                if 'w' in perm: n += 2
+                if 'x' in perm: n += 1
+                return str(n)
+            
+            res = to_num(user) + to_num(group) + to_num(other)
+            await interaction.response.send_message(f"chmod {value} = `{res}`")
+        except:
+            await interaction.response.send_message("Invalid format. Use 777 or rwxrwxrwx.")
+    else:
+        await interaction.response.send_message("Invalid format. Use 3 digits (777) or 9 chars (rwxrwxrwx).")
+
+@bot.tree.command(name="cidr", description="Calculates IP range for a CIDR block")
+async def cidr(interaction: discord.Interaction, network: str):
+    try:
+        net = ipaddress.ip_network(network, strict=False)
+        embed = discord.Embed(title=f"CIDR: {network}", color=discord.Color.blue())
+        embed.add_field(name="Num Addresses", value=str(net.num_addresses), inline=True)
+        embed.add_field(name="Netmask", value=str(net.netmask), inline=True)
+        embed.add_field(name="First IP", value=str(net[0]), inline=True)
+        embed.add_field(name="Last IP", value=str(net[-1]), inline=True)
+        await interaction.response.send_message(embed=embed)
+    except ValueError:
+        await interaction.response.send_message("Invalid CIDR notation.", ephemeral=True)
+
+@bot.tree.command(name="dns", description="Resolves A and AAAA records for a domain")
+async def dns(interaction: discord.Interaction, domain: str):
+    try:
+        loop = asyncio.get_running_loop()
+        # Run blocking socket calls in executor
+        a_records = await loop.run_in_executor(None, socket.gethostbyname_ex, domain)
+        
+        embed = discord.Embed(title=f"DNS: {domain}", color=discord.Color.blue())
+        embed.add_field(name="A Records", value="\n".join(a_records[2]), inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+    except socket.gaierror:
+        await interaction.response.send_message(f"Could not resolve {domain}", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="headers", description="Fetches and shows HTTP headers")
+async def headers(interaction: discord.Interaction, url: str):
+    if not url.startswith("http"):
+        url = "http://" + url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.head(url) as resp:
+                headers_text = "\n".join(f"{k}: {v}" for k, v in resp.headers.items())
+                if len(headers_text) > 1900:
+                    headers_text = headers_text[:1900] + "..."
+                await interaction.response.send_message(f"```http\n{headers_text}\n```")
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="jwt_peek", description="Decodes a JWT payload (no verification)")
+async def jwt_peek(interaction: discord.Interaction, token: str):
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            await interaction.response.send_message("Invalid JWT format.", ephemeral=True)
+            return
+        
+        payload = parts[1]
+        # Fix padding
+        payload += '=' * (-len(payload) % 4)
+        decoded = base64.b64decode(payload).decode()
+        parsed = json.loads(decoded)
+        formatted = json.dumps(parsed, indent=2)
+        
+        await interaction.response.send_message(f"```json\n{formatted}\n```", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Error decoding JWT: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="json_fmt", description="Validates and pretty-prints JSON")
+async def json_fmt(interaction: discord.Interaction, data: str):
+    try:
+        parsed = json.loads(data)
+        formatted = json.dumps(parsed, indent=2)
+        if len(formatted) > 1900:
+            # Send as file if too long
+            with open("formatted.json", "w") as f:
+                f.write(formatted)
+            await interaction.response.send_message("JSON is valid. Result too long, sending file.", file=discord.File("formatted.json"))
+            os.remove("formatted.json")
+        else:
+            await interaction.response.send_message(f"```json\n{formatted}\n```")
+    except json.JSONDecodeError:
+        await interaction.response.send_message("Invalid JSON.", ephemeral=True)
+
+@bot.tree.command(name="md5", description="Generates MD5 hash")
+async def md5(interaction: discord.Interaction, text: str):
+    h = hashlib.md5(text.encode()).hexdigest()
+    await interaction.response.send_message(f"`{h}`")
+
+@bot.tree.command(name="sha1", description="Generates SHA1 hash")
+async def sha1(interaction: discord.Interaction, text: str):
+    h = hashlib.sha1(text.encode()).hexdigest()
+    await interaction.response.send_message(f"`{h}`")
+
+@bot.tree.command(name="sha512", description="Generates SHA512 hash")
+async def sha512(interaction: discord.Interaction, text: str):
+    h = hashlib.sha512(text.encode()).hexdigest()
+    await interaction.response.send_message(f"`{h}`")
+
+@bot.tree.command(name="url_enc", description="URL encodes text")
+async def url_enc(interaction: discord.Interaction, text: str):
+    await interaction.response.send_message(f"`{urllib.parse.quote(text)}`")
+
+@bot.tree.command(name="url_dec", description="URL decodes text")
+async def url_dec(interaction: discord.Interaction, text: str):
+    await interaction.response.send_message(f"`{urllib.parse.unquote(text)}`")
+
+@bot.tree.command(name="rot13", description="Applies ROT13 cipher")
+async def rot13(interaction: discord.Interaction, text: str):
+    # Simple rot13 implementation
+    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    trans = chars[13:] + chars[:13] + chars[39:] + chars[26:39]
+    table = str.maketrans(chars, trans)
+    await interaction.response.send_message(f"`{text.translate(table)}`")
+
+@bot.tree.command(name="caesar", description="Applies Caesar cipher")
+async def caesar(interaction: discord.Interaction, text: str, shift: int):
+    result = ""
+    for char in text:
+        if char.isalpha():
+            ascii_offset = 65 if char.isupper() else 97
+            result += chr((ord(char) - ascii_offset + shift) % 26 + ascii_offset)
+        else:
+            result += char
+    await interaction.response.send_message(f"`{result}`")
+
+@bot.tree.command(name="hex_enc", description="Converts text to hex")
+async def hex_enc(interaction: discord.Interaction, text: str):
+    await interaction.response.send_message(f"`{text.encode().hex()}`")
+
+@bot.tree.command(name="hex_dec", description="Converts hex to text")
+async def hex_dec(interaction: discord.Interaction, hex_str: str):
+    try:
+        text = bytes.fromhex(hex_str).decode()
+        await interaction.response.send_message(f"`{text}`")
+    except Exception:
+        await interaction.response.send_message("Invalid hex string.", ephemeral=True)
+
+@bot.tree.command(name="epoch", description="Converts Unix timestamp or shows current")
+async def epoch(interaction: discord.Interaction, timestamp: Optional[int] = None):
+    if timestamp is None:
+        ts = int(time.time())
+        await interaction.response.send_message(f"Current Epoch: `{ts}`")
+    else:
+        try:
+            dt = datetime.datetime.fromtimestamp(timestamp)
+            await interaction.response.send_message(f"Date: `{dt}`")
+        except Exception:
+            await interaction.response.send_message("Invalid timestamp.", ephemeral=True)
+
+@bot.tree.command(name="curl", description="Fetches raw text content of a URL")
+async def curl(interaction: discord.Interaction, url: str):
+    if not url.startswith("http"):
+        url = "http://" + url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                text = await resp.text()
+                if len(text) > 1900:
+                    text = text[:1900] + "... (truncated)"
+                await interaction.response.send_message(f"```\n{text}\n```")
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
 
 # --- Basic Commands ---
 
@@ -97,7 +361,6 @@ async def rps(interaction: discord.Interaction, choice: Literal['rock', 'paper',
 
 @bot.tree.command(name="choose", description="Randomly picks one option (separate with commas)")
 async def choose(interaction: discord.Interaction, options: str):
-    # Slash commands don't support *args nicely, so we take a string and split it
     option_list = [opt.strip() for opt in options.split(',')]
     if len(option_list) < 2:
         await interaction.response.send_message("Please provide at least two options separated by commas.")
@@ -261,7 +524,7 @@ async def purge(interaction: discord.Interaction, amount: int):
     await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"Purged {amount} messages.", ephemeral=True)
 
-# --- Security Commands ---
+# --- VirusTotal ---
 
 @bot.tree.command(name="scan", description="Scan a file with VirusTotal")
 async def scan(interaction: discord.Interaction, attachment: discord.Attachment):
@@ -282,12 +545,15 @@ async def scan(interaction: discord.Interaction, attachment: discord.Attachment)
     # Upload to VirusTotal
     url = "https://www.virustotal.com/api/v3/files"
     headers = {"x-apikey": VIRUSTOTAL_API_KEY}
-    files = {"file": (attachment.filename, data)}
+    
+    form_data = aiohttp.FormData()
+    form_data.add_field('file', data, filename=attachment.filename)
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, data=files) as resp:
+        async with session.post(url, headers=headers, data=form_data) as resp:
             if resp.status != 200:
-                await interaction.followup.send(f"VirusTotal upload failed: {resp.status}", ephemeral=True)
+                error_text = await resp.text()
+                await interaction.followup.send(f"VirusTotal upload failed: {resp.status} - {error_text}", ephemeral=True)
                 return
             json_resp = await resp.json()
             analysis_id = json_resp['data']['id']
