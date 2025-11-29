@@ -586,6 +586,111 @@ async def scan(interaction: discord.Interaction, attachment: discord.Attachment)
     
     await interaction.followup.send("Scan timed out or is still processing. Check back later.", ephemeral=True)
 
+# --- Roblox Commands ---
+
+@bot.tree.command(name="roblox_versions", description="Shows current Roblox versions")
+async def roblox_versions(interaction: discord.Interaction):
+    url = "https://weao.xyz/api/versions/current"
+    headers = {"User-Agent": "WEAO-3PService"}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    await interaction.response.send_message(f"Failed to fetch versions: {resp.status}", ephemeral=True)
+                    return
+                data = await resp.json()
+                
+        embed = discord.Embed(title="Roblox Versions (Live)", color=discord.Color.red())
+        
+        # Windows
+        embed.add_field(name="Windows", value=f"Version: `{data.get('Windows', 'N/A')}`\nDate: {data.get('WindowsDate', 'N/A')}", inline=False)
+        # Mac
+        embed.add_field(name="Mac", value=f"Version: `{data.get('Mac', 'N/A')}`\nDate: {data.get('MacDate', 'N/A')}", inline=False)
+        # Android
+        embed.add_field(name="Android", value=f"Version: `{data.get('Android', 'N/A')}`\nDate: {data.get('AndroidDate', 'N/A')}", inline=False)
+        # iOS
+        embed.add_field(name="iOS", value=f"Version: `{data.get('iOS', 'N/A')}`\nDate: {data.get('iOSDate', 'N/A')}", inline=False)
+        
+        embed.set_footer(text="Powered by WeAreDevs API")
+        await interaction.response.send_message(embed=embed)
+        
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="exploits", description="Shows status of known Roblox exploits")
+async def exploits(interaction: discord.Interaction, platform: Optional[Literal['Windows', 'MacOS', 'iOS', 'Android']] = None):
+    url = "https://weao.xyz/api/status/exploits"
+    headers = {"User-Agent": "WEAO-3PService"}
+    
+    await interaction.response.defer()
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send(f"Failed to fetch exploits: {resp.status}")
+                    return
+                data = await resp.json()
+        
+        # Filter by platform if provided
+        if platform:
+            # Map MacOS to Mac for API compatibility
+            api_platform = "Mac" if platform == "MacOS" else platform
+            data = [e for e in data if e.get('platform', '').lower() == api_platform.lower()]
+            if not data:
+                await interaction.followup.send(f"No exploits found for platform: {platform}")
+                return
+
+        # Pagination logic
+        chunk_size = 10 # 10 fields per embed is safe
+        chunks = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+        
+        if not chunks:
+             await interaction.followup.send("No exploits found.")
+             return
+
+        for i, chunk in enumerate(chunks):
+            embed = discord.Embed(
+                title=f"Exploit Status {f'({platform})' if platform else ''} - Page {i+1}/{len(chunks)}", 
+                color=discord.Color.dark_theme()
+            )
+            
+            for exploit in chunk:
+                title = exploit.get('title', 'Unknown')
+                
+                # Status icons
+                updated = "✅" if exploit.get('updateStatus') else "❌"
+                detected = "⚠️ Detected" if exploit.get('detected') else "🛡️ Undetected"
+                free = "Free" if exploit.get('free') else f"Paid ({exploit.get('cost', 'N/A')})"
+                
+                # Details
+                details = [
+                    f"**Status**: {updated} | **Detection**: {detected}",
+                    f"**Version**: {exploit.get('version', 'N/A')} | **RBX**: {exploit.get('rbxversion', 'N/A')}",
+                    f"**Platform**: {exploit.get('platform', 'N/A')} ({exploit.get('type', 'N/A')})",
+                    f"**Cost**: {free} | **Key System**: {'Yes' if exploit.get('keysystem') else 'No'}",
+                    f"**UNC**: {exploit.get('uncPercentage', 0)}% | **sUNC**: {exploit.get('suncPercentage', 0)}%",
+                    f"**Updated**: {exploit.get('updatedDate', 'N/A')}",
+                ]
+                
+                # Links
+                links = []
+                if exploit.get('websitelink'): links.append(f"[Website]({exploit.get('websitelink')})")
+                if exploit.get('discordlink'): links.append(f"[Discord]({exploit.get('discordlink')})")
+                if exploit.get('purchaselink'): links.append(f"[Purchase]({exploit.get('purchaselink')})")
+                
+                if links:
+                    details.append(" | ".join(links))
+                    
+                embed.add_field(name=title, value="\n".join(details), inline=False)
+            
+            embed.set_footer(text="Powered by WeAreDevs API")
+            await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        await interaction.followup.send(f"Error: {str(e)}")
+
 if __name__ == '__main__':
     if TOKEN:
         bot.run(TOKEN)
